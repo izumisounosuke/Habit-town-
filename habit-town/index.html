@@ -326,6 +326,29 @@ function showWarn(){
 
 /* ---------- 記録の読み書き ---------- */
 function active(){ return state.habits.filter(function(h){ return !h.archived; }); }
+function schedDays(h){
+  var g=h.goal||{};
+  return (g.days&&g.days.length)?g.days:[0,1,2,3,4,5,6];
+}
+function weekIdx(k,anchor){
+  var m=mondayOf(parseKey(k)), a=mondayOf(parseKey(anchor||k));
+  return Math.round((m.getTime()-a.getTime())/604800000);
+}
+function dueOn(h,k){
+  var g=h.goal||{type:"daily"};
+  if (g.biweekly && ((weekIdx(k,g.anchor)%2)+2)%2!==0) return false;
+  if (g.type==="days") return schedDays(h).indexOf((parseKey(k).getDay()+6)%7)>=0;
+  return true;
+}
+function dueList(k){ return active().filter(function(h){ return dueOn(h,k); }); }
+function dueCount(k){ return dueList(k).length; }
+function schedText(h){
+  var g=h.goal||{type:"daily"}, s;
+  if (g.type==="week") s="週"+g.n+"回";
+  else if (g.type==="days") s=schedDays(h).map(function(i){ return WD[i]; }).join("");
+  else s="毎日";
+  return s+(g.biweekly?"・隔週":"");
+}
 function dayIds(day){ return Object.keys(day).filter(function(k){ return k!=="_n"; }); }
 function ent(k,id){ var d=state.log[k]; return d && d[id] ? d[id] : null; }
 function rawOf(k,id){ var e=ent(k,id); return e && e.l ? e.l : 0; }
@@ -338,7 +361,7 @@ function subOn(k,id,sid){ var e=ent(k,id); return !!(e && e.s && e.s[sid]); }
 function touch(k,id){
   var day=state.log[k]||(state.log[k]={});
   var e=day[id]||(day[id]={});
-  day._n=active().length;
+  day._n=dueCount(k);
   return e;
 }
 function cleanup(k,id){
@@ -370,10 +393,14 @@ function weekCount(anchor,id){
   return c;
 }
 function streakCount(id){
-  var cur=parseKey(todayKey);
-  if (!doneOn(keyOf(cur),id)) cur=addDays(cur,-1);
-  var c=0;
-  while (doneOn(keyOf(cur),id)&&c<9000){ c++; cur=addDays(cur,-1); }
+  var h=habitById(id), cur=parseKey(todayKey), c=0, guard=0;
+  while (guard++<3000){
+    var k=keyOf(cur);
+    if (h&&!dueOn(h,k)){ cur=addDays(cur,-1); continue; }
+    if (doneOn(k,id)){ c++; cur=addDays(cur,-1); continue; }
+    if (k===todayKey){ cur=addDays(cur,-1); continue; }
+    break;
+  }
   return c;
 }
 function dayRatio(k){
@@ -384,8 +411,8 @@ function dayRatio(k){
   ids.forEach(function(id){ s+=levelOf(k,id); });
   return Math.min(1,s/(n*2));
 }
-function doneCount(k){ var c=0; active().forEach(function(h){ if(levelOf(k,h.id)>=1) c++; }); return c; }
-function fullCount(k){ var c=0; active().forEach(function(h){ if(levelOf(k,h.id)===2) c++; }); return c; }
+function doneCount(k){ var c=0; dueList(k).forEach(function(h){ if(levelOf(k,h.id)>=1) c++; }); return c; }
+function fullCount(k){ var c=0; dueList(k).forEach(function(h){ if(levelOf(k,h.id)===2) c++; }); return c; }
 function dayMinutes(k){
   var day=state.log[k]; if(!day) return 0;
   var s=0; dayIds(day).forEach(function(id){ s+=minOf(k,id); });
@@ -486,7 +513,7 @@ function summarize(kind,k){
   act.forEach(function(h){ seen[h.id]=true; });
   var d=parseKey(startK), end=parseKey(endK);
   while (d<=end){
-    var kk=keyOf(d), day=state.log[kk], n=(day&&day._n)?day._n:act.length, dn=0;
+    var kk=keyOf(d), day=state.log[kk], n=(day&&day._n)?day._n:dueCount(kk), dn=0;
     res.days++; res.slots+=n;
     if (day){
       dayIds(day).forEach(function(id){
@@ -508,10 +535,26 @@ function summarize(kind,k){
   res.ids=Object.keys(seen);
   return res;
 }
-function targetOf(id,days){
+function targetIn(id,startK,endK){
   var h=habitById(id);
-  if (h&&h.goal&&h.goal.type==="week") return Math.max(1,h.goal.n*days/7);
-  return days;
+  var d=parseKey(startK), end=parseKey(endK);
+  if (!h){
+    var n=0;
+    while (d<=end){ n++; d=addDays(d,1); }
+    return Math.max(1,n);
+  }
+  var g=h.goal||{type:"daily"}, due=0, byWeek={};
+  while (d<=end){
+    var k=keyOf(d);
+    if (dueOn(h,k)){ due++; var w=keyOf(mondayOf(d)); byWeek[w]=(byWeek[w]||0)+1; }
+    d=addDays(d,1);
+  }
+  if (g.type==="week"){
+    var t=0;
+    for (var w2 in byWeek) t+=(g.n||1)*byWeek[w2]/7;
+    return Math.max(1,t);
+  }
+  return Math.max(1,due);
 }
 function pct(a,b){ return b>0?Math.round(a/b*100):0; }
 
@@ -540,7 +583,7 @@ function stopTimer(silent){
     var dd=state.log[day]||(state.log[day]={});
     var en=dd[id]||(dd[id]={});
     en.m=(en.m||0)+m;
-    dd._n=active().length;
+    dd._n=dueCount(day);
     invalidate();
   }
   save();
@@ -704,7 +747,7 @@ function renderHead(){
   var d=parseKey(selKey);
   el("eyebrow").textContent=(selKey===todayKey)?"TODAY":(d.getFullYear()+" 年の記録");
   el("date").innerHTML=(d.getMonth()+1)+"/"+d.getDate()+'<span class="wd">'+wdOf(d)+'</span>';
-  var done=doneCount(selKey), total=active().length, mins=dayMinutes(selKey);
+  var done=doneCount(selKey), total=dueCount(selKey), mins=dayMinutes(selKey);
   el("count").innerHTML=done+"<small>/"+total+"</small>";
   el("remain").textContent=(total-done===0?"この日は完了":"残り "+(total-done))+"・"+fmtMin(mins);
   el("next").disabled=(selKey===todayKey);
@@ -730,7 +773,17 @@ function renderWeek(){
 
 /* ---------- 描画：タスク一覧 ---------- */
 function statText(h){
-  if (h.goal.type==="week") return weekCount(parseKey(selKey),h.id)+"/"+h.goal.n+" 週";
+  var g=h.goal||{type:"daily"};
+  if (g.type==="week") return weekCount(parseKey(selKey),h.id)+"/"+g.n+" 週";
+  if (g.type==="days"||g.biweekly){
+    var mon=mondayOf(parseKey(selKey)), c=0, t=0;
+    for (var i=0;i<7;i++){
+      var k=keyOf(addDays(mon,i));
+      if (dueOn(h,k)){ t++; if (doneOn(k,h.id)) c++; }
+    }
+    if (!t) return "今週は対象外";
+    return c+"/"+t+" 週";
+  }
   var s=streakCount(h.id);
   return s>0?s+"日連続":"毎日";
 }
@@ -740,7 +793,9 @@ function renderList(){
   var future=selKey>todayKey, isToday=selKey===todayKey;
 
   CAT_ORDER.forEach(function(cat){
-    var items=active().filter(function(h){ return h.cat===cat; });
+    var items=active().filter(function(h){
+      return h.cat===cat && (dueOn(h,selKey)||rawOf(selKey,h.id)||minOf(selKey,h.id));
+    });
     if (!items.length) return;
     var grp=document.createElement("div");
     var head=document.createElement("div");
@@ -759,7 +814,8 @@ function renderList(){
       b.setAttribute("data-level",String(lv));
       b.setAttribute("aria-label",h.name+"："+["未実施","最低ライン達成","目標達成"][lv]);
       if (future) b.disabled=true;
-      var sub=(h.min||h.full)?"最低 "+(h.min||"—")+"　／　目標 "+(h.full||"—"):"";
+      var sub=schedText(h)+((h.min||h.full)?"　最低 "+(h.min||"—")+"／目標 "+(h.full||"—"):"")+
+        (dueOn(h,selKey)?"":"　※この日は対象外");
       b.innerHTML='<span class="box"><i class="dash"></i><svg viewBox="0 0 12 12" aria-hidden="true">'+
         '<path d="M1.5 6.4 L4.4 9.2 L10.5 2.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>'+
         '<span style="min-width:0"><span class="label"><span class="mark" style="background:'+
@@ -861,6 +917,18 @@ function renderList(){
     });
     box.appendChild(grp);
   });
+
+  var off=active().filter(function(h){
+    return !dueOn(h,selKey)&&!rawOf(selKey,h.id)&&!minOf(selKey,h.id);
+  });
+  if (off.length){
+    var note=document.createElement("div");
+    note.className="subtle";
+    note.style.padding="10px 12px";
+    note.style.borderTop="1px solid var(--faint)";
+    note.textContent="この日が対象外："+off.map(function(h){ return h.name+"（"+schedText(h)+"）"; }).join("、");
+    box.appendChild(note);
+  }
 }
 function toggleLevel(id,rowEl){
   var lv=levelOf(selKey,id), next=(lv+1)%3;
@@ -954,14 +1022,14 @@ function renderRate(){
   } else {
     var rate=pct(s.done,s.slots), grate=pct(s.goal,s.slots), prate=pct(s.perfect,s.days);
     var tTarget=0;
-    active().forEach(function(h){ if (h.targetMin) tTarget+=h.targetMin*s.days; });
+    active().forEach(function(h){ if (h.targetMin) tTarget+=h.targetMin*targetIn(h.id,s.from,s.to); });
     var rows=s.ids.map(function(id){
       var p=s.per[id]||{done:0,goal:0,mins:0};
-      var tg=targetOf(id,s.days), h=habitById(id);
+      var tg=targetIn(id,s.from,s.to), h=habitById(id);
       var wk=(h&&h.goal&&h.goal.type==="week");
       var tgd=wk?Math.max(1,Math.round(tg)):tg;
-      var mt=(h&&h.targetMin)?"／目標 "+fmtMin(h.targetMin*s.days):"";
-      return '<div class="hrow"><div class="t">'+habitName(id)+
+      var mt=(h&&h.targetMin)?"／目標 "+fmtMin(h.targetMin*tg):"";
+      return '<div class="hrow"><div class="t">'+habitName(id)+(h?'<span class="subtle">（'+schedText(h)+'）</span>':'')+
         '<em class="mono">'+pct(p.done,tg)+'%・'+p.done+'/'+tgd+(wk?"回":"日")+'（目標到達 '+p.goal+'）</em></div>'+
         '<div class="hbar"><i style="width:'+Math.min(100,pct(p.done,tg))+'%"></i></div>'+
         '<div class="hbar g" style="margin-top:3px"><i style="width:'+Math.min(100,pct(p.goal,tg))+'%"></i></div>'+
@@ -1182,15 +1250,24 @@ function editRow(h){
     cb.onclick=function(){ h.cat=c; save(); renderList(); };
     line.appendChild(cb);
   });
-  var daily=document.createElement("button");
-  daily.className="chip"; daily.textContent="毎日"; daily.style.marginLeft="8px";
-  daily.setAttribute("data-on",h.goal.type==="daily"?"1":"0");
-  daily.onclick=function(){ h.goal={type:"daily"}; save(); renderList(); };
-  var weekly=document.createElement("button");
-  weekly.className="chip"; weekly.textContent="週何回";
-  weekly.setAttribute("data-on",h.goal.type==="week"?"1":"0");
-  weekly.onclick=function(){ h.goal={type:"week",n:h.goal.n||3}; save(); renderList(); };
-  line.appendChild(daily); line.appendChild(weekly);
+  d.appendChild(line);
+
+  var sline=document.createElement("div");
+  sline.className="tools";
+  function setType(t){
+    if (t==="daily") h.goal={type:"daily",biweekly:h.goal.biweekly,anchor:h.goal.anchor};
+    else if (t==="week") h.goal={type:"week",n:h.goal.n||3,biweekly:h.goal.biweekly,anchor:h.goal.anchor};
+    else h.goal={type:"days",days:(h.goal.days&&h.goal.days.length)?h.goal.days:[0,2,4],biweekly:h.goal.biweekly,anchor:h.goal.anchor};
+    if (!h.goal.biweekly){ delete h.goal.biweekly; delete h.goal.anchor; }
+    save(); renderList();
+  }
+  [["daily","毎日"],["week","週何回"],["days","曜日"]].forEach(function(x){
+    var b=document.createElement("button");
+    b.className="chip"; b.textContent=x[1];
+    b.setAttribute("data-on",h.goal.type===x[0]?"1":"0");
+    b.onclick=function(){ setType(x[0]); };
+    sline.appendChild(b);
+  });
   if (h.goal.type==="week"){
     var sel=document.createElement("select");
     sel.className="chip mono"; sel.setAttribute("aria-label","週の回数");
@@ -1199,14 +1276,52 @@ function editRow(h){
       if (h.goal.n===n) o.selected=true;
       sel.appendChild(o);
     });
-    sel.onchange=function(){ h.goal={type:"week",n:+sel.value}; save(); };
-    line.appendChild(sel);
+    sel.onchange=function(){ h.goal.n=+sel.value; save(); renderList(); };
+    sline.appendChild(sel);
   }
+  var bw=document.createElement("button");
+  bw.className="chip"; bw.textContent="隔週";
+  bw.setAttribute("data-on",h.goal.biweekly?"1":"0");
+  bw.onclick=function(){
+    if (h.goal.biweekly){ delete h.goal.biweekly; delete h.goal.anchor; }
+    else { h.goal.biweekly=true; h.goal.anchor=keyOf(mondayOf(parseKey(selKey))); }
+    save(); renderList();
+  };
+  sline.appendChild(bw);
+  d.appendChild(sline);
+
+  if (h.goal.type==="days"){
+    var dline=document.createElement("div");
+    dline.className="tools";
+    WD.forEach(function(w,i){
+      var b=document.createElement("button");
+      b.className="chip"; b.textContent=w;
+      b.setAttribute("data-on",schedDays(h).indexOf(i)>=0?"1":"0");
+      b.onclick=function(){
+        var ds=schedDays(h).slice(), at=ds.indexOf(i);
+        if (at>=0) ds.splice(at,1); else ds.push(i);
+        ds.sort(function(a,b2){ return a-b2; });
+        h.goal.days=ds.length?ds:[i];
+        save(); renderList();
+      };
+      dline.appendChild(b);
+    });
+    d.appendChild(dline);
+  }
+  if (h.goal.biweekly){
+    var an=document.createElement("div");
+    an.className="subtle"; an.style.marginTop="6px";
+    an.textContent="隔週の基準は "+h.goal.anchor+" の週です（この週と1週おきが対象）。";
+    d.appendChild(an);
+  }
+
+  var fline=document.createElement("div");
+  fline.className="tools";
   var fin=document.createElement("button");
   fin.className="chip"; fin.textContent="終了にする"; fin.style.marginLeft="auto";
   fin.onclick=function(){ h.archived=true; save(); renderAll(); };
-  line.appendChild(fin);
-  d.appendChild(line);
+  fline.appendChild(fin);
+  d.appendChild(fline);
   return d;
 }
 
