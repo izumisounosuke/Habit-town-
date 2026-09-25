@@ -1,5 +1,5 @@
 /* 習慣の町 — オフライン用サービスワーカー */
-var CACHE = "habit-town-v4";
+var CACHE = "habit-town-v5";
 var ASSETS = [
   "./",
   "./index.html",
